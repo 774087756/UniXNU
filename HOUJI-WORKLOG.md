@@ -194,3 +194,15 @@
   - `/cpus` 含 `cpu-map`（Linux 专用）。现有生成器已按 `device_type` 过滤，风险在整体转换路径。
 - 未改动 HOUJI-ADT-CANDIDATE.json：现有生成器逻辑与上述结论一致（ranges 已按 `>IQI` 处理 4 cell，CPU 已按 device_type 过滤），重新生成结果不变。
 - 边界：P1 可结项，但仍无运行期 EFI 内存图、GOP 几何、CurrentEL/MPIDR。本轮未生成可启动 ADT，未操作手机。
+
+## 2026-11-08：P2 首件（最小 ADT 生成与校验）
+
+- 用户授权自行决策。决策一：FD 保持 `0xA7100000`，接受覆盖 ramoops。理由是该地址有 `MemoryMapLib.c` 与 `board.toml` 两个独立来源，迁移即无证据猜测。遗留矛盾（原厂若在此加载固件卷则 pstore 失效）未解决，列为阻塞项，靠运行期 EFI 内存图定案。
+- 读 XNU `ac9718fb` `machine_routines.c` 确认三条拓扑约束：`state` 对每个 CPU 节点都必需且缺失即 panic；`assert(boot_cpu == NULL)` 要求恰好一个 running；`phys_cluster_id = AFF1`，本机 8 核为 0…7 共 8 个物理簇，而 `patches/xnu-12377/native-smp-secondary.patch` 只改 `MAX_CPUS` 4→8、`MAX_CPU_CLUSTERS` 仍为 1。结论：八核 ADT 必然触发 `assert(phys_cluster_id <= MAX_CPU_CLUSTER_PHY_ID)`，与 `sheng-smp` 无关；单核是唯一可解析形态。
+- 新增 `scripts/build-houji-adt.py`：白名单生成最小 ADT，不转换 Linux 树。根名 `device-tree`；9 个节点（root、chosen、cpus+cpu@0、arm-io+intc、defaults、options、psci）；不含 `/memory`、`/reserved-memory`、cpu-map 及 `/soc` 其余节点。CHRP bank 由脚本内联合成（nvram 0/32、common 32/2064、free 2096/6096）。
+- 新增 `scripts/check-houji-adt.py`：按 ArmDTPlatform、ArmCpu、XNU 拓扑契约校验，并逐项回比源 FDT（ranges、GIC 四元组、stride、PSCI、CPU affinity），防「自洽但抄错」。CHRP 校验复用 `check-houji-chrp.py`，单一来源。
+- 产物（仓库外私有目录）：`houji-adt-min1.dtb` 8784 字节，SHA256 `5f0e78856654152bf2a86b1a755824e6f08188961b6c6767d01ad26af72bf3a1`；同输入重复生成哈希一致。
+- 校验结果：PASS，9 节点、1 CPU（affinity 0x0）、1 running、1 簇；7 项负例全部被拒（无 running、双 running、缺 state、混入 /memory、ranges 截断、混入 cpu-map、八核在单簇上限下）。八核检查已固化为规则而非文档描述。
+- 新增 HOUJI-P2-ADT-CANDIDATE.md 记录决策、约束推导、节点表与未覆盖项。
+- 明确未覆盖：`/memory` 与 dram-base/size 消费链、`/defaults` 与 `/options` 属性集、根节点属性、boot-args 通道、GIC MMIO 可访问性。
+- 下一步：引导链写盘路径审查（UEFI、DarwinBoot、`fastboot boot` 边界）与恢复方案可执行性验证。本轮无构建、无启动、无设备操作。
