@@ -206,3 +206,14 @@
 - 新增 HOUJI-P2-ADT-CANDIDATE.md 记录决策、约束推导、节点表与未覆盖项。
 - 明确未覆盖：`/memory` 与 dram-base/size 消费链、`/defaults` 与 `/options` 属性集、根节点属性、boot-args 通道、GIC MMIO 可访问性。
 - 下一步：引导链写盘路径审查（UEFI、DarwinBoot、`fastboot boot` 边界）与恢复方案可执行性验证。本轮无构建、无启动、无设备操作。
+
+## 2026-11-08：写盘路径审查与「不影响安卓」契约
+
+- 用户要求：不影响安卓的情况下启动 iOS。已固化为 HOUJI-ANDROID-SAFETY.md：判定标准、证据、禁止清单、门禁检查表。
+- 代码级证据（全部指向默认配置无持久写路径）：`APRIORI.inc` 注释声明第一阶段无 storage/USB mass-storage/capsule/OEM updater；`DXE.inc` 注释声明变量使用 RAM 模拟存储，并含 `NoCapsuleRuntimeDxe`；`houji.dsc` 无任何 `PcdFlashNvStorage*`；`RAM.inc` 注释声明唯一块设备是只读内存盘、无物理磁盘控制器；`WITH_HOUJI_UFS_MMIO` 默认 FALSE；`DarwinBoot.c:84` 以 `EFI_FILE_MODE_READ` 只读打开。
+- 实机级证据（同机型先例）：`UniXNU-houji/docs/device-tests.md` 第 5、77、208、227 行记录多轮 `fastboot boot` 临时启动，明确「启动分区、GPT 与 misc 均未改变」，并曾进入 iOS 桌面后返回 Recovery。本机型 `fastboot boot` 可用这一最大前置未知已由先例解决。
+- 阶段判断：P3 内核启动与约束完全兼容（全链 RAM 内）。P4 用户空间与约束直接冲突——上游 `docs/concepts/userdata.md` 以 userdata 承载 Darwin 根卷（`SHNGROOT` 窗口），houji 使用 32 GiB HFSX 系统卷；该记录只声明 boot/GPT/misc 未变，从未声明 userdata 未变，故根卷很可能占用 userdata。
+- 待用户确认：当年是否牺牲了安卓数据。若已牺牲，则「不影响安卓」与「iOS 用户空间」在现有方案下不可兼得，需在外接 USB 存储（B）与 userdata 内文件（C）之间选择，两者均需新驱动，不在 P2/P3 展开。
+- 新增 `scripts/fingerprint-android-state.py`：只读计算 `misc`、`boot_a`、`vbmeta_a`、`dtbo_a`、`init_boot_a` 与分区表清单的 SHA256，供启动前后比对。全程 `adb exec-out su -c 'cat ...'` 管道读取，不在设备端写文件、不改权限、不挂载、不重启。局限已在脚本与文档中声明：GPT 以分区清单近似，不改尺寸与偏移的改名不会反映。
+- 未执行：脚本未对设备运行（需用户授权），`fastboot boot` 未在本机实测，无任何设备操作。
+- 下一步：恢复方案可执行性验证、门禁实测（启动前后指纹比对），以及根卷存储路线决策。
