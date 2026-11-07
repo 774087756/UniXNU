@@ -67,6 +67,6 @@ P1 已结项，P2 进行中。已完成：最小 ADT 生成器与校验器（白
 
 已定决策：FD 保持 `0xA7100000`，接受覆盖 ramoops（唯一有双来源支持的地址，迁移即猜测）。已定硬约束：多核 ADT 在当前 `MAX_CPU_CLUSTERS=1` 下必然 panic，单核是唯一可解析形态。
 
-待用户确认：houji iOS 16 时期 32 GiB HFSX 根卷是否占用了 userdata。若是，则「不影响安卓」与「iOS 用户空间」在现有方案下不可兼得，需按 HOUJI-ANDROID-SAFETY.md 第四节选 B 或 C 路线。
+已确认设备现状（HOUJI-DEVICE-BASELINE.md）：本机从未刷过 iOS 16，当前为澎湃OS，安卓数据完整；iOS 16 的实机记录来自原作者设备。因此 P4 根卷**不得**占用 userdata，只能在外接 USB 存储与 userdata 内文件之间选择。`cust` 分区不存在，借用现有分区的方案已排除。
 
 不以连续增加 CI 开关代替板级适配工作。

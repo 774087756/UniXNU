@@ -217,3 +217,16 @@
 - 新增 `scripts/fingerprint-android-state.py`：只读计算 `misc`、`boot_a`、`vbmeta_a`、`dtbo_a`、`init_boot_a` 与分区表清单的 SHA256，供启动前后比对。全程 `adb exec-out su -c 'cat ...'` 管道读取，不在设备端写文件、不改权限、不挂载、不重启。局限已在脚本与文档中声明：GPT 以分区清单近似，不改尺寸与偏移的改名不会反映。
 - 未执行：脚本未对设备运行（需用户授权），`fastboot boot` 未在本机实测，无任何设备操作。
 - 下一步：恢复方案可执行性验证、门禁实测（启动前后指纹比对），以及根卷存储路线决策。
+
+## 2026-11-08：目标设备只读基线
+
+- 用户确认：**本机从未刷过 iOS 16，当前为澎湃OS**。此前 `UniXNU-houji` 的实机记录（含 32 GiB HFSX 系统卷、`fastboot boot` 进桌面）属于原作者设备，与本机无关。因此本机安卓数据完整，必须保持完整。
+- 经用户授权执行只读采集，新增 HOUJI-DEVICE-BASELINE.md。未写设备、未改权限、未挂载、未重启。
+- 系统：`houji` / 23127PN0CC / SM8650 / 澎湃OS / Android 17 / `OS4.0.18.0.XNCCNXM` / `user` / 槽位 `_a` / MemTotal 15524336 kB。
+- 解锁与 root：`ro.boot.flash.locked=0`、`ro.boot.verifiedbootstate=orange`；ADB shell 为 `uid=2000(shell)`，`su -c id` 返回 `uid=0`、`u:r:ksu:s0`（KernelSU 可用）。
+- 分区：129 个 by-name 条目。`sda` 490.7 GiB；`super`=sda32 7.8 GiB；`userdata`=sda33 482.0 GiB；`misc`=sda11 4 MiB；`logfs`=sda13 8 MiB；`boot_a`=sde12 96 MiB；`init_boot_a`=sde27 8 MiB；`dtbo_a`=sde16 24 MiB；`vbmeta_a`=sde15 128 KiB；`recovery_a`=sde25 独立存在。**`cust` 不存在。**
+- 存储：`/data` 为 f2fs（经 dm-linear `dm-49`），总 482 GiB、已用 173 GiB、可用 309 GiB。
+- 路线影响：方案 D（借用现有分区）因无 `cust` 排除；方案 E 违反禁止清单。P4 根卷只剩外接 USB 或 userdata 内文件两条。容量不是瓶颈（309 GiB 空闲），障碍是 XNU 需块级访问而数据是 f2fs 文件。
+- 已采集指纹基线 `fingerprint-before.json`（仓库外）：`misc` `f4d714ba…`(4.0 MiB)、`boot_a` `9b8fc3be…`(96.0 MiB)、`vbmeta_a` `47a206e1…`(128 KiB)、`dtbo_a` `a73b9109…`(24.0 MiB)、`init_boot_a` `ddbf8e8e…`(8.0 MiB)、分区清单 `fb018ac4…`、`/proc/partitions` `94e0e85d…`。此为后续比对基准。
+- 未验证：`fastboot boot` 在本机是否可用（需重启进 bootloader，等有启动镜像时一次完成）。AVB 为 orange 状态，理论上不因签名拒绝，但厂商可能限制命令本身。
+- 序列号未记录，符合项目记录规则。
