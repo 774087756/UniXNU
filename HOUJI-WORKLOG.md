@@ -230,3 +230,17 @@
 - 已采集指纹基线 `fingerprint-before.json`（仓库外）：`misc` `f4d714ba…`(4.0 MiB)、`boot_a` `9b8fc3be…`(96.0 MiB)、`vbmeta_a` `47a206e1…`(128 KiB)、`dtbo_a` `a73b9109…`(24.0 MiB)、`init_boot_a` `ddbf8e8e…`(8.0 MiB)、分区清单 `fb018ac4…`、`/proc/partitions` `94e0e85d…`。此为后续比对基准。
 - 未验证：`fastboot boot` 在本机是否可用（需重启进 bootloader，等有启动镜像时一次完成）。AVB 为 orange 状态，理论上不因签名拒绝，但厂商可能限制命令本身。
 - 序列号未记录，符合项目记录规则。
+
+## 2026-11-08：ADT 格式更正（FDT → Apple ADT）
+
+- **发现前一轮产物格式错误**：`build-houji-adt.py` 初版输出 FDT/DTB，而 DarwinBoot 与 XNU 解析的是 Apple ADT 二进制格式，两者容器完全不同。初版若进实机必被 `EFI_COMPROMISED_DATA` 拒绝。
+- 证据链：`DarwinBoot.c:535` 在交接前调用 `AdtNode` 完整遍历并强制 `Offset == TreeSize`；`AdtNode`（185–262 行）读节点头 `UINT32 Properties; UINT32 Children`，属性为 `name[32] + UINT32 Length + value` 并按 4 字节对齐；XNU `pexpert/gen/device_tree.c` 的 `next = align_up(cur + 36 + length, 4)` 与之吻合；`FindChild` 用 `SecureDTGetProperty(child, "name", ...)` 取名，证明节点名是属性而非内联；`archive/scripts/make-houji-adt.py` 亦用 `adt.serialize`/`adt.parse` 并以根名 `device-tree` 往返校验。
+- 由此得到两条硬约束：`nProperties == 0` 的节点其子节点不可达（`skipProperties` 返回 NULL），故每节点必须带 `name`；树尾不得有填充（DarwinBoot 要求精确消耗）。两者均已固化为检查规则与负例。
+- 新增 `scripts/houji-adt-format.py`：Apple ADT 序列化与解析的单一来源，生成器与检查器共用。
+- 重写 `scripts/build-houji-adt.py`：输出 Apple ADT；10 个节点；每节点自动写入 `name`；根属性与 `/chosen` 的 `dram-base`/`dram-size`/`firmware-version`/`darwinboot-memory-size` 沿用已验证树；CPU 节点名 `cpu0`，补 `compatible`；GIC 节点名 `intc`（新驱动要求，旧树为 `gic`）；新增 `aliases` 节点。
+- 重写 `scripts/check-houji-adt.py`：改用 ADT 解析；新增格式层校验（精确消耗、属性名 NUL、每节点有 name、深度、重复属性）；负例扩到 10 项，新增「树尾追加 4 字节」「树截断」「窗口为 0」。
+- **修正第二处错误**：初版 CHRP bank 的签名字节用了 `0x7F`，历史 fixture 是 `0x70`；且漏了 `nvram-bank-count` 与 `nvram-current-bank` 两个属性。现已与历史 fixture 逐字节一致，bank SHA256 `3c6e675b2f28d917c292a325131c6c868d6ddb82ed8a74fd90c607cdb7fb3525`。
+- 产物：`houji-adt-min1.adt` 9716 字节，SHA256 `7238f50266a88b02f54775811cb3464d80f96da82f93954ce8eeac986fd5835a`；10 节点、1 CPU（affinity 0x0）、1 running、窗口 256 MiB；同输入重复生成哈希一致。
+- 校验：PASS，10 项负例全部被拒。
+- boot.img 组装依赖 Mu-Silicium 检出、aarch64 交叉工具链与已构建固件卷，本机 Windows 不具备，需 CI 或 macOS。
+- 边界：本轮仍无构建、无启动、无设备操作。初版 FDT 产物作废，仅语义结论（属性宽度与取值）保留。

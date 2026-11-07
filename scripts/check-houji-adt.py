@@ -1,8 +1,9 @@
-"""Validate a generated houji ADT against the current driver contract.
+"""Validate a generated houji ADT against the driver and loader contracts.
 
-Checks the blob against ArmDTPlatform, ArmCpu and the pinned XNU topology
-parser, and against the source FDT it was derived from. Static only: nothing
-here proves the tree can boot.
+Three consumers constrain the blob: DarwinBoot walks it before handoff and
+requires the walk to end exactly at the file length, XNU's topology parser
+reads state/reg per CPU node, and ArmDTPlatform and ArmCpu read the GIC and
+NVRAM properties with fixed widths. Static only: nothing here proves a boot.
 """
 import argparse
 import hashlib
@@ -12,19 +13,20 @@ from pathlib import Path
 import runpy
 
 HERE = Path(__file__).resolve().parent
-ALLOWED = {'/', '/chosen', '/cpus', '/arm-io', '/arm-io/intc', '/defaults', '/options', '/psci'}
-FORBIDDEN = ('/memory', '/reserved-memory', 'cpu-map', '/soc', '/firmware')
+ALLOWED = {'/', '/chosen', '/cpus', '/arm-io', '/arm-io/intc',
+           '/defaults', '/options', '/aliases', '/psci'}
+FORBIDDEN = ('memory', 'reserved-memory', 'soc', 'cpu-map')
 REQUIRED = ('/chosen', '/cpus', '/arm-io', '/defaults', '/options', '/psci')
 
 
 def _normalize(nodes):
-    """Re-key the parsed tree so the root is '/' regardless of its node name."""
+    """Re-key so the root is '/', whatever the root node is called."""
     roots = [p for p in nodes if '/' not in p]
     if len(roots) != 1:
-        raise ValueError('Expected exactly one root node, found %d' % len(roots))
+        raise ValueError('expected exactly one root node, found %d' % len(roots))
     name = roots[0]
     if name != 'device-tree':
-        raise ValueError('Root node is %r, platform expert expects device-tree' % name)
+        raise ValueError('root node is %r, the platform expert expects device-tree' % name)
     out = {}
     for path, props in nodes.items():
         if path == name:
@@ -32,51 +34,59 @@ def _normalize(nodes):
         elif path.startswith(name + '/'):
             out['/' + path[len(name) + 1:]] = props
         else:
-            raise ValueError('Detached node: %s' % path)
+            raise ValueError('detached node: %s' % path)
     return out
 
 
 def validate(blob, source_nodes=None, allow_multicpu=False):
-    """Return a report dict; raise ValueError on any contract violation."""
-    parse = runpy.run_path(str(HERE / 'inspect-houji-fdt.py'))['parse']
+    fmt = runpy.run_path(str(HERE / 'houji-adt-format.py'))
     chrp = runpy.run_path(str(HERE / 'check-houji-chrp.py'))['validate']
-    nodes, reserve = parse(blob)
-    if reserve:
-        raise ValueError('Unexpected memory reservation entries')
+
+    nodes, used = fmt['parse'](blob)
+    # DarwinBoot refuses the tree unless the walk consumes the whole file.
+    if used != len(blob):
+        raise ValueError('walk consumed %d of %d bytes; DarwinBoot requires an exact end'
+                         % (used, len(blob)))
     nodes = _normalize(nodes)
 
-    # --- tree shape -------------------------------------------------------
     for path in nodes:
-        if any(f in path for f in FORBIDDEN):
-            raise ValueError('Forbidden node in ADT: %s' % path)
-        if path not in ALLOWED and not path.startswith('/cpus/cpu@'):
-            raise ValueError('Node outside the whitelist: %s' % path)
+        if any(f in path.strip('/').split('/') for f in FORBIDDEN):
+            raise ValueError('forbidden node in ADT: %s' % path)
+        if path not in ALLOWED and not path.startswith('/cpus/'):
+            raise ValueError('node outside the whitelist: %s' % path)
     if len(nodes) > 16:
-        raise ValueError('Node count %d exceeds the bring-up budget' % len(nodes))
+        raise ValueError('node count %d exceeds the bring-up budget' % len(nodes))
     for required in REQUIRED:
         if required not in nodes:
-            raise ValueError('Required node absent: %s' % required)
+            raise ValueError('required node absent: %s' % required)
 
     # --- NVRAM ------------------------------------------------------------
     chosen = nodes['/chosen']
-    if len(chosen.get('nvram-bank-size', b'')) != 4:
-        raise ValueError('nvram-bank-size is not 4 bytes')
+    for key, width in (('nvram-bank-size', 4), ('nvram-bank-count', 4), ('nvram-current-bank', 4)):
+        if len(chosen.get(key, b'')) != width:
+            raise ValueError('%s is not %d bytes' % (key, width))
     if len(chosen.get('nvram-proxy-data', b'')) == 0:
         raise ValueError('nvram-proxy-data is empty')
     parts = chrp({'nvram-bank-size': chosen['nvram-bank-size'],
                   'nvram-proxy-data': chosen['nvram-proxy-data']})
+    window = chosen.get('darwinboot-memory-size', b'')
+    if len(window) != 8:
+        raise ValueError('darwinboot-memory-size must be 8 bytes')
+    window_bytes, = struct.unpack('<Q', window)
+    if not (256 << 20 <= window_bytes <= 8 << 30) or window_bytes % (2 << 20):
+        raise ValueError('darwinboot-memory-size out of range or unaligned')
 
     # --- CPU --------------------------------------------------------------
     cpu_paths = sorted(p for p in nodes if p.startswith('/cpus/'))
     if not cpu_paths:
-        raise ValueError('No CPU nodes')
+        raise ValueError('no CPU nodes')
     running, affinities = 0, []
     for path in cpu_paths:
         props = nodes[path]
         if props.get('device_type') != b'cpu\0':
             raise ValueError('%s is not device_type cpu' % path)
         if 'state' not in props:
-            raise ValueError('%s has no state property (parser panics)' % path)
+            raise ValueError('%s has no state property (the parser panics)' % path)
         if props['state'].rstrip(b'\0') == b'running':
             running += 1
         reg = props.get('reg', b'')
@@ -84,16 +94,13 @@ def validate(blob, source_nodes=None, allow_multicpu=False):
             raise ValueError('%s reg is not 4 bytes' % path)
         affinities.append(struct.unpack('<I', reg)[0])
     if running != 1:
-        raise ValueError('Expected exactly one running CPU, found %d' % running)
+        raise ValueError('expected exactly one running CPU, found %d' % running)
     if len(set(affinities)) != len(affinities):
-        raise ValueError('Duplicate CPU affinities')
+        raise ValueError('duplicate CPU affinities')
+    clusters = {(a >> 8) & 0xFF for a in affinities}
     for affinity in affinities:
         if ((affinity >> 8) & 0xFF) > 7:
             raise ValueError('AFF1 beyond the audited range')
-    # The topology parser derives one cluster per distinct AFF1 and the current
-    # patch leaves MAX_CPU_CLUSTERS at 1, so a multi-CPU tree asserts before any
-    # driver runs. Refuse it here instead of producing a tree that cannot boot.
-    clusters = {(a >> 8) & 0xFF for a in affinities}
     if len(cpu_paths) > 1 and not allow_multicpu:
         raise ValueError('%d CPU nodes span %d clusters; MAX_CPU_CLUSTERS is 1'
                          % (len(cpu_paths), len(clusters)))
@@ -101,11 +108,11 @@ def validate(blob, source_nodes=None, allow_multicpu=False):
     # --- GIC --------------------------------------------------------------
     bus = nodes['/arm-io'].get('ranges', b'')
     if len(bus) != 24:
-        raise ValueError('arm-io ranges is %d bytes, driver needs 24' % len(bus))
+        raise ValueError('arm-io ranges is %d bytes, the driver needs 24' % len(bus))
     intc = nodes['/arm-io/intc']
     reg = intc.get('reg', b'')
     if len(reg) != 32:
-        raise ValueError('intc reg is %d bytes, driver needs 32' % len(reg))
+        raise ValueError('intc reg is %d bytes, the driver needs 32' % len(reg))
     if intc.get('compatible', b'') != b'arm,gic-v3\0':
         raise ValueError('intc compatible must be the 11-byte NUL-terminated string')
     stride_raw = intc.get('redistributor-stride', b'')
@@ -113,7 +120,7 @@ def validate(blob, source_nodes=None, allow_multicpu=False):
         raise ValueError('redistributor-stride is not 8 bytes')
     stride, = struct.unpack('<Q', stride_raw)
     if stride not in (0x20000, 0x30000, 0x40000):
-        raise ValueError('Unsupported stride %#x' % stride)
+        raise ValueError('unsupported stride %#x' % stride)
 
     regions = struct.unpack('<4Q', reg)
     child, parent, span = struct.unpack('<3Q', bus)
@@ -153,6 +160,7 @@ def validate(blob, source_nodes=None, allow_multicpu=False):
 
     return {
         'result': 'PASS',
+        'format': 'apple-adt',
         'adt_sha256': hashlib.sha256(blob).hexdigest(),
         'adt_bytes': len(blob),
         'nodes': len(nodes),
@@ -162,14 +170,16 @@ def validate(blob, source_nodes=None, allow_multicpu=False):
         'clusters': len(clusters),
         'gic_regions': [hex(v) for v in regions],
         'gic_stride': hex(stride),
+        'window_mib': window_bytes >> 20,
         'nvram_partitions': parts,
         'scope': 'static contract check only; no boot, no MMIO',
     }
 
 
-def _negative_cases(fdt_path, source_nodes):
+def _negative_cases(fdt_path):
     """Mutate the tree and confirm the checker refuses each variant."""
     build = runpy.run_path(str(HERE / 'build-houji-adt.py'))
+    fmt = runpy.run_path(str(HERE / 'houji-adt-format.py'))
     raw, nodes = build['load_fdt'](Path(fdt_path))
     ext = build['extract'](nodes)
     cases = {}
@@ -177,43 +187,54 @@ def _negative_cases(fdt_path, source_nodes):
     def cpus_of(tree):
         return next(c for c in tree.children if c.name == 'cpus')
 
+    def set_prop(node, key, value):
+        node.props = [(k, value if k == key else v) for k, v in node.props]
+
     tree = build['build_tree'](ext, 1)
-    cpus_of(tree).children[0].props[b'state'] = b'not-running\0'
-    cases['no running cpu'] = build['serialize'](tree)
+    set_prop(cpus_of(tree).children[0], 'state', b'waiting\0')
+    cases['no running cpu'] = fmt['serialize'](tree)
 
     tree = build['build_tree'](ext, 2)
     for cpu in cpus_of(tree).children:
-        cpu.props[b'state'] = b'running\0'
-    cases['two running cpus'] = build['serialize'](tree)
+        set_prop(cpu, 'state', b'running\0')
+    cases['two running cpus'] = fmt['serialize'](tree)
 
     tree = build['build_tree'](ext, 1)
-    del cpus_of(tree).children[0].props[b'state']
-    cases['missing state'] = build['serialize'](tree)
+    cpu0 = cpus_of(tree).children[0]
+    cpu0.props = [(k, v) for k, v in cpu0.props if k != 'state']
+    cases['missing state'] = fmt['serialize'](tree)
 
     tree = build['build_tree'](ext, 1)
-    leaked = build['Node']('memory')
-    leaked.props[b'reg'] = b'\0' * 16
-    tree.add(leaked)
-    cases['leaked memory node'] = build['serialize'](tree)
+    tree.add(fmt['Node']('memory', [('reg', b'\0' * 16)]))
+    cases['leaked memory node'] = fmt['serialize'](tree)
 
     tree = build['build_tree'](ext, 1)
     arm_io = next(c for c in tree.children if c.name == 'arm-io')
-    arm_io.props[b'ranges'] = arm_io.props[b'ranges'][:16]
-    cases['short ranges'] = build['serialize'](tree)
+    set_prop(arm_io, 'ranges', arm_io.get('ranges')[:16])
+    cases['short ranges'] = fmt['serialize'](tree)
 
     tree = build['build_tree'](ext, 1)
-    cpus_of(tree).add(build['Node']('cpu-map'))
-    cases['cpu-map leaked in'] = build['serialize'](tree)
+    cpus_of(tree).add(fmt['Node']('cpu-map'))
+    cases['cpu-map leaked in'] = fmt['serialize'](tree)
+
+    tree = build['build_tree'](ext, 1)
+    chosen = next(c for c in tree.children if c.name == 'chosen')
+    set_prop(chosen, 'darwinboot-memory-size', bytes(8))
+    cases['zero memory window'] = fmt['serialize'](tree)
+
+    good = fmt['serialize'](build['build_tree'](ext, 1))
+    cases['trailing bytes after the tree'] = good + b'\0' * 4
+    cases['truncated tree'] = good[:-4]
 
     return cases
 
 
 def _multicpu_case(fdt_path):
-    """An eight-CPU tree, which the current cluster limit cannot accept."""
     build = runpy.run_path(str(HERE / 'build-houji-adt.py'))
+    fmt = runpy.run_path(str(HERE / 'houji-adt-format.py'))
     raw, nodes = build['load_fdt'](Path(fdt_path))
     ext = build['extract'](nodes)
-    return build['serialize'](build['build_tree'](ext, len(ext['cpus'])))
+    return fmt['serialize'](build['build_tree'](ext, len(ext['cpus'])))
 
 
 def main():
@@ -236,7 +257,7 @@ def main():
         if not args.source:
             raise SystemExit('--negatives requires --source')
         rejected = []
-        for name, variant in _negative_cases(args.source, source_nodes).items():
+        for name, variant in _negative_cases(args.source).items():
             try:
                 validate(variant, None, allow_multicpu=True)
             except ValueError:

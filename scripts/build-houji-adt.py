@@ -1,8 +1,11 @@
 """Build a minimal houji ADT from the live FDT. Output is NOT bootable.
 
-The device tree is built by whitelist, not by converting the Linux tree: the
-platform expert publishes a nub for every /arm-io child and the live /soc has
-545 of them. Only the nodes the current drivers actually read are emitted.
+The tree is built by whitelist, not by converting the Linux tree: the platform
+expert publishes a nub for every /arm-io child and the live /soc has 545 of
+them. Only the nodes the current drivers read are emitted.
+
+The container is Apple's ADT, not FDT. DarwinBoot parses the ADT itself before
+handoff and rejects anything that does not walk to exactly the file length.
 """
 import argparse
 import hashlib
@@ -12,17 +15,13 @@ import zlib
 from pathlib import Path
 import runpy
 
-FDT_MAGIC = 0xD00DFEED
-FDT_BEGIN_NODE, FDT_END_NODE, FDT_PROP, FDT_END = 1, 2, 3, 9
-
-# Apple's platform path matches the tree by this root node name.
-ROOT_NAME = 'device-tree'
+HERE = Path(__file__).resolve().parent
 NVRAM_BANK_SIZE = 8192
+WINDOW_MIB = 256
 
 
 def load_fdt(path):
-    """Parse a live FDT with the existing read-only parser."""
-    parse = runpy.run_path(str(Path(__file__).with_name('inspect-houji-fdt.py')))['parse']
+    parse = runpy.run_path(str(HERE / 'inspect-houji-fdt.py'))['parse']
     raw = path.read_bytes()
     nodes, _ = parse(raw)
     return raw, nodes
@@ -35,8 +34,8 @@ def extract(nodes):
         raise ValueError('Unexpected /soc cell widths')
     if nodes['/']['#address-cells'] != struct.pack('>I', 2):
         raise ValueError('Unexpected root address width')
-    # ranges entry is child(1) + parent(2) + length(1) cells because the root
-    # declares two address cells; parsing it as three cells misaligns the data.
+    # ranges is child(1) + parent(2) + length(1) cells: the root declares two
+    # address cells, so reading three cells misaligns every later field.
     child, parent, span = struct.unpack('>IQI', soc['ranges'])
 
     gics = [(p, v) for p, v in nodes.items()
@@ -69,7 +68,6 @@ def extract(nodes):
     cpus.sort(key=lambda c: c[1])
     if not cpus:
         raise ValueError('No CPU nodes found')
-    # Affinity drives both the XNU cluster id (AFF1) and the PSCI target.
     for _, affinity in cpus:
         if (affinity >> 8) & 0xFF > 7:
             raise ValueError('AFF1 beyond the audited range')
@@ -77,7 +75,6 @@ def extract(nodes):
     return {
         'ranges': struct.pack('<3Q', child, parent, span),
         'gic_regions': regions,
-        'gic_compatible': b'arm,gic-v3\0',
         'gic_stride': struct.pack('<Q', stride),
         'psci_method': method,
         'cpus': cpus,
@@ -85,120 +82,77 @@ def extract(nodes):
     }
 
 
-def blank_chrp_bank(size=NVRAM_BANK_SIZE):
-    """Build the empty v1 CHRP bank: nvram header, common, free partitions."""
-    bank = bytearray(size)
+def nvram_proxy(size=NVRAM_BANK_SIZE):
+    """The empty volatile CHRP bank, byte for byte as the proven fixture."""
+    def header(name, length):
+        raw = bytearray(struct.pack('<BBH12s', 0x70, 0, length // 16, name))
+        checksum = sum(raw)
+        while checksum > 255:
+            checksum = (checksum & 255) + (checksum >> 8)
+        raw[1] = checksum
+        return raw
 
-    def header(offset, name, blocks):
-        sig = 0x7F
-        raw = bytearray(16)
-        raw[0] = sig
-        raw[2:4] = struct.pack('<H', blocks)
-        raw[4:16] = name.encode('ascii').ljust(12, b'\0')
-        total = sig + sum(raw[2:])
-        while total > 255:
-            total = (total & 0xFF) + (total >> 8)
-        raw[1] = total
-        bank[offset:offset + 16] = raw
-
-    header(0, 'nvram', 2)             # 32 bytes
-    header(32, 'common', 129)         # 16 + 2048 = 2064 bytes
-    header(2096, 'free', 381)         # 16 + 6080 = 6096 bytes
-    struct.pack_into('<I', bank, 20, 1)  # generation
-    struct.pack_into('<I', bank, 16, zlib.adler32(bytes(bank[20:])))
-    return bytes(bank)
-
-
-class Node:
-    __slots__ = ('name', 'props', 'children')
-
-    def __init__(self, name):
-        self.name = name
-        self.props = {}
-        self.children = []
-
-    def add(self, child):
-        self.children.append(child)
-        return child
+    image = bytearray(size)
+    image[:16] = header(b'nvram', 32)
+    image[32:48] = header(b'common', 2064)
+    image[2096:2112] = header(b'free', len(image) - 2096)
+    struct.pack_into('<I', image, 16, zlib.adler32(bytes(image[20:])))
+    return {
+        'nvram-bank-size': struct.pack('<I', len(image)),
+        'nvram-bank-count': struct.pack('<I', 1),
+        'nvram-current-bank': bytes(4),
+        'nvram-proxy-data': bytes(image),
+    }
 
 
-def build_tree(ext, cpu_count):
-    root = Node(ROOT_NAME)
+def build_tree(ext, cpu_count, window_mib=WINDOW_MIB):
+    Node = runpy.run_path(str(HERE / 'houji-adt-format.py'))['Node']
 
-    chosen = root.add(Node('chosen'))
-    chosen.props[b'nvram-bank-size'] = struct.pack('<I', NVRAM_BANK_SIZE)
-    chosen.props[b'nvram-proxy-data'] = blank_chrp_bank()
+    root = Node('device-tree', [
+        ('compatible', b'xiaomi,houji\0qcom,sm8650\0AppleARM\0'),
+        ('model', b'Xiaomi 14\0'),
+        ('manufacturer', b'Xiaomi\0'),
+        ('target-type', b'houji\0'),
+    ])
 
-    # Only the boot candidate is emitted by default: the topology parser derives
-    # one cluster per distinct AFF1, and the current patch allows a single
-    # cluster, so eight nodes would trip its assert before any driver runs.
+    chosen = root.add(Node('chosen', [
+        # Both stay zero: DarwinBoot fills the real window through BootArgs and
+        # no consumer of these two has been located in the pinned sources.
+        ('dram-base', bytes(8)),
+        ('dram-size', bytes(8)),
+        ('darwinboot-memory-size', struct.pack('<Q', window_mib * 1024 * 1024)),
+        ('firmware-version', b'houji-xnu-12377-uefi\0'),
+    ] + list(nvram_proxy().items())))
+
     cpus = root.add(Node('cpus'))
-    cpus.props[b'#address-cells'] = struct.pack('>I', 1)
-    cpus.props[b'#size-cells'] = struct.pack('>I', 0)
+    # One CPU only: the topology parser derives a cluster per distinct AFF1 and
+    # the patch allows a single cluster, so eight nodes trip its assert before
+    # any driver runs.
     for index in range(cpu_count):
-        path, affinity = ext['cpus'][index]
-        cpu = cpus.add(Node('cpu@%x' % affinity))
-        cpu.props[b'device_type'] = b'cpu\0'
-        cpu.props[b'reg'] = struct.pack('<I', affinity)
-        # state is mandatory on every CPU node; the parser panics without it.
-        cpu.props[b'state'] = b'running\0' if index == 0 else b'disabled\0'
+        _, affinity = ext['cpus'][index]
+        cpus.add(Node('cpu%d' % index, [
+            ('device_type', b'cpu\0'),
+            ('reg', struct.pack('<I', affinity)),
+            ('compatible', b'qcom,kryo\0ARM,v8\0'),
+            # Mandatory on every CPU node; the parser panics without it.
+            ('state', b'running\0' if index == 0 else b'waiting\0'),
+        ]))
 
-    arm_io = root.add(Node('arm-io'))
-    arm_io.props[b'ranges'] = ext['ranges']
-    intc = arm_io.add(Node('intc'))
-    intc.props[b'reg'] = struct.pack('<4Q', *ext['gic_regions'])
-    intc.props[b'compatible'] = ext['gic_compatible']
-    intc.props[b'redistributor-stride'] = ext['gic_stride']
+    arm_io = root.add(Node('arm-io', [('ranges', ext['ranges'])]))
+    arm_io.add(Node('intc', [
+        ('reg', struct.pack('<4Q', *ext['gic_regions'])),
+        ('compatible', b'arm,gic-v3\0'),
+        ('redistributor-stride', ext['gic_stride']),
+    ]))
 
-    # Apple-only nodes: the platform expert requires both to exist, the Linux
-    # tree has neither. They carry no properties yet.
+    # Apple-only nodes. The platform expert requires defaults and options to
+    # exist; aliases is carried over from the proven houji tree.
     root.add(Node('defaults'))
     root.add(Node('options'))
+    root.add(Node('aliases'))
 
-    psci = root.add(Node('psci'))
-    psci.props[b'method'] = ext['psci_method']
-
+    root.add(Node('psci', [('method', ext['psci_method'])]))
     return root
-
-
-def serialize(root):
-    strings = bytearray()
-    offsets = {}
-
-    def name_offset(name):
-        if name not in offsets:
-            offsets[name] = len(strings)
-            strings.extend(name + b'\0')
-        return offsets[name]
-
-    body = bytearray()
-
-    def emit(node):
-        body.extend(struct.pack('>I', FDT_BEGIN_NODE))
-        body.extend(node.name.encode('ascii') + b'\0')
-        while len(body) % 4:
-            body.append(0)
-        for key in sorted(node.props):
-            value = node.props[key]
-            body.extend(struct.pack('>III', FDT_PROP, len(value), name_offset(key)))
-            body.extend(value)
-            while len(body) % 4:
-                body.append(0)
-        for child in node.children:
-            emit(child)
-        body.extend(struct.pack('>I', FDT_END_NODE))
-
-    emit(root)
-    body.extend(struct.pack('>I', FDT_END))
-
-    header_len = 40
-    rsvmap = bytes(16)
-    off_struct = header_len + len(rsvmap)
-    off_strings = off_struct + len(body)
-    total = off_strings + len(strings)
-    header = struct.pack('>10I', FDT_MAGIC, total, off_struct, off_strings,
-                         header_len, 17, 16, 0, len(strings), len(body))
-    return header + rsvmap + body + strings
 
 
 def main():
@@ -206,34 +160,50 @@ def main():
     parser.add_argument('fdt', type=Path)
     parser.add_argument('output', type=Path)
     parser.add_argument('--cpus', type=int, default=1,
-                        help='CPU nodes to emit (default 1; >1 is not bootable today)')
+                        help='CPU nodes to emit (default 1; more is not bootable today)')
+    parser.add_argument('--window-mib', type=int, default=WINDOW_MIB,
+                        help='darwinboot-memory-size, 256..8192 and 2 MiB aligned')
     args = parser.parse_args()
 
+    if not (256 <= args.window_mib <= 8192) or args.window_mib % 2:
+        raise SystemExit('--window-mib must be 256..8192 and a multiple of 2')
+
+    format_module = runpy.run_path(str(HERE / 'houji-adt-format.py'))
     raw, nodes = load_fdt(args.fdt)
     ext = extract(nodes)
     if not 1 <= args.cpus <= len(ext['cpus']):
         raise SystemExit('--cpus must be between 1 and %d' % len(ext['cpus']))
 
-    blob = serialize(build_tree(ext, args.cpus))
-    args.output.write_bytes(blob)
+    blob = format_module['serialize'](build_tree(ext, args.cpus, args.window_mib))
 
+    parsed, used = format_module['parse'](blob)
+    if used != len(blob):
+        raise SystemExit('ADT did not round-trip: consumed %d of %d bytes' % (used, len(blob)))
+    if parsed.get('device-tree', {}).get('name') != b'device-tree\0':
+        raise SystemExit('root node name is wrong after round-trip')
+
+    args.output.write_bytes(blob)
     manifest = {
         'status': 'OFFLINE_ADT_NOT_BOOTABLE',
+        'format': 'apple-adt',
         'source_fdt_sha256': hashlib.sha256(raw).hexdigest(),
         'adt_sha256': hashlib.sha256(blob).hexdigest(),
         'adt_bytes': len(blob),
-        'root_name': ROOT_NAME,
+        'nodes': len(parsed),
         'cpu_nodes': args.cpus,
         'cpu_affinities': [hex(a) for _, a in ext['cpus'][:args.cpus]],
+        'window_mib': args.window_mib,
         'soc_ranges_cells': [hex(v) for v in ext['soc_ranges_cells']],
         'gic_regions': [hex(v) for v in ext['gic_regions']],
         'gic_stride': hex(struct.unpack('<Q', ext['gic_stride'])[0]),
         'psci_method': ext['psci_method'].rstrip(b'\0').decode(),
-        'nvram_bank_bytes': NVRAM_BANK_SIZE,
+        'nvram_bank_sha256': hashlib.sha256(nvram_proxy()['nvram-proxy-data']).hexdigest(),
         'decisions': {
+            'container': 'Apple ADT, not FDT: DarwinBoot parses the ADT itself before handoff',
             'fd_base': '0xA7100000 kept; the only address with two independent documentary sources',
             'ramoops_overlap': 'accepted; loading the firmware volume overwrites the persistent kernel log',
-            'boot_cpu': 'cpu@0 (affinity 0x0) is an unverified candidate until P3 reads MPIDR_EL1',
+            'boot_cpu': 'cpu0 (affinity 0x0) is an unverified candidate until P3 reads MPIDR_EL1',
+            'dram_base_size': 'left zero to match the proven tree; consumer chain still unresolved',
         },
         'blockers': [
             'Boot MPIDR unverified; topology assumes affinity 0x0 is the running core',
@@ -243,7 +213,8 @@ def main():
         ],
     }
     args.output.with_suffix('.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
-    print('Wrote %s (%d bytes, %d CPU node(s)); not bootable.' % (args.output, len(blob), args.cpus))
+    print('Wrote %s (%d bytes, %d nodes, %d CPU); Apple ADT, not bootable.'
+          % (args.output, len(blob), len(parsed), args.cpus))
 
 
 if __name__ == '__main__':
