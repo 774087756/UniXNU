@@ -1,0 +1,34 @@
+name: Houji toolchain check (no device image)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  toolchain:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Inspect Apple toolchain and compile an ARM64 object
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -m
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphoneos --find clang
+          python3 --version
+          probe_dir=$(mktemp -d)
+          trap 'rm -rf "$probe_dir"' EXIT
+          printf 'int houji_toolchain_probe(void) { return 26; }\n' > "$probe_dir/probe.c"
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=26.0 \
+            -ffreestanding -c "$probe_dir/probe.c" -o "$probe_dir/probe.o"
+          file "$probe_dir/probe.o"
+          {
+            echo '## Toolchain probe only'
+            echo 'Compiled a freestanding ARM64 object; no kernel or phone image was built.'
+            echo 'No repository checkout, device access, firmware input, or artifact upload.'
+          } >> "$GITHUB_STEP_SUMMARY"
