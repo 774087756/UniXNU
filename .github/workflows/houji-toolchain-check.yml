@@ -8,8 +8,10 @@ permissions:
 
 jobs:
   toolchain:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 10
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
       - name: Inspect Apple toolchain and compile an ARM64 object
         shell: bash
@@ -19,6 +21,11 @@ jobs:
           uname -m
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
+          sdk_version=$(xcrun --sdk iphoneos --show-sdk-version)
+          if [[ "$sdk_version" != 26.* ]]; then
+            echo "Expected an iOS 26 SDK, got $sdk_version" >&2
+            exit 1
+          fi
           xcrun --sdk iphoneos --find clang
           python3 --version
           probe_dir=$(mktemp -d)
