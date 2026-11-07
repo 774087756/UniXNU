@@ -179,3 +179,18 @@
 - 新增本地远端 `fork` 指向 774087756/UniXNU；`origin` 仍为上游 none24smu/UniXNU。
 - 已知结构性问题：三个工作流的 checkout 固定为 `repository: none24smu/UniXNU`、`ref: 68c5134`，本地/fork 提交不参与 CI 构建。若要让 CI 验证 fork 上的改动，须改 workflow 的 repository/ref，属下一轮待决项。
 - 边界：本轮未修改任何源码、未触发新 CI、未操作手机、未生成可启动产物。
+
+## 2026-11-08：P1 结项（参数来源表）
+
+- 新增 HOUJI-PARAM-PROVENANCE.md：按平台入口、GIC、CPU/拓扑、PSCI、内存、显示六组列出每个启动必需参数的消费方要求、来源证据、目标取值与状态（已证实/候选/阻塞）。
+- 证据全部来自本机 FDT（SHA256 447f2527…）、ArmDTPlatform.cpp、ArmCpu.cpp、Apple XNU ac9718fb、houji MemoryMapLib.c 与历史 ADT 生成器。未引入新推断。
+- 三个未决项结论：
+  1. `XBL_Ramdump` 条目范围正确、名称错误。FDT 精确证据：`qlink_logging_region@84800000`=0x84800000+0x200000，`xbl_ramdump_region@84a00000`=0x84A00000+0x200000。该条目地址长度与 qlink 一致，与 xbl_ramdump 不一致。真正的 xbl_ramdump 区在内存表中无条目；是否需补取决于运行期 EFI 内存图，本轮未读取，不判定为缺陷。
+  2. ramoops 与 FD 区为所有权交接而非地址冲突。FDT `ramoops_region`=0xA7000000+0x400000（唯一覆盖该范围的保留节点，console-size 与 pmsg-size 各 0x200000，无 no-map）；内存表 `FD_Reserved`(1 MiB)+`UEFI_FD`(3 MiB) 合计恰好 4 MiB 与之完全重合。实际代价是加载固件卷会覆盖上一轮持久内核日志，属 P2 决策项。
+  3. 启动核 MPIDR 仍阻塞。FDT 无 `state`，Linux `cpu-map` 只描述拓扑不含启动核，`/proc/cpuinfo` 与 DT `reg` 都只反映 affinity。不猜测：P2 以 cpu@0 为未证实候选，P3 在最早入口读 `mpidr_el1` 反证。
+- 本轮新发现（影响 P2 实现方式）：
+  - `ArmDTPlatform::createDeviceNubs` 为 `/arm-io` 每个子节点建 nub，而本机 `/soc` 有 545 个直接子节点。ADT 必须白名单裁剪到最小集合，不能整体改名转换。
+  - `/soc ranges` 为 16 字节而非 12 字节：`/soc` 声明 1 个地址 cell，父节点 `/` 声明 2 个，故条目为 1+2+1=4 cell。按 3 cell 解析会错位；24 字节目标值必须重新编码。
+  - `/cpus` 含 `cpu-map`（Linux 专用）。现有生成器已按 `device_type` 过滤，风险在整体转换路径。
+- 未改动 HOUJI-ADT-CANDIDATE.json：现有生成器逻辑与上述结论一致（ranges 已按 `>IQI` 处理 4 cell，CPU 已按 device_type 过滤），重新生成结果不变。
+- 边界：P1 可结项，但仍无运行期 EFI 内存图、GOP 几何、CurrentEL/MPIDR。本轮未生成可启动 ADT，未操作手机。
