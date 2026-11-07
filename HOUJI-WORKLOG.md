@@ -168,3 +168,14 @@
 - No Apple handler execution claimed. Full getNVRAMProperties/unserialize/publication chain and complete ADT validation remain pending.
 - Read pinned pe_init.c and arm_vm_init.c; no dram-base/dram-size strings there. This is only scoped negative evidence, not proof those properties are unused globally.
 - No phone operation or bootable artifact generated.
+
+## 2026-11-08：资产归位与远端同步
+
+- 提交前盘点：ios26 工作副本相对 68c5134 有 18 个未跟踪文件（10 份 HOUJI 文档、1 份 ADT 候选 JSON、5 个脚本、3 个工作流），远端两个仓库均无。此前它们只存在于本机。
+- 核对工作流一致性：三个 workflow 与 fork main 上已实际运行的版本内容相同，差异仅为 CRLF/LF；`.gitattributes` 为 `* text=auto eol=lf`，提交时自动归一为 LF。
+- 补装 PyYAML 6.0.3（此前本机缺失，工作流只做过 `bash -n`），对三个 workflow 执行真实 YAML 解析：均通过，job/触发/steps 结构与预期一致；HOUJI-ADT-CANDIDATE.json 解析通过，status 仍为 OFFLINE_CONTRACT_ONLY_NOT_BOOTABLE。
+- 按显式文件清单提交（未使用 `git add` 全目录），提交 20feee8，18 文件 1079 行。提交身份为仓库级 774087756 <774087756@users.noreply.github.com>。
+- 推送成功：68c5134..20feee8 → fork 774087756/UniXNU 分支 ios26，远端已核对为 20feee8。GitHub 写入此前返回 403，本轮已恢复，不再需要网页提交工作流。
+- 新增本地远端 `fork` 指向 774087756/UniXNU；`origin` 仍为上游 none24smu/UniXNU。
+- 已知结构性问题：三个工作流的 checkout 固定为 `repository: none24smu/UniXNU`、`ref: 68c5134`，本地/fork 提交不参与 CI 构建。若要让 CI 验证 fork 上的改动，须改 workflow 的 repository/ref，属下一轮待决项。
+- 边界：本轮未修改任何源码、未触发新 CI、未操作手机、未生成可启动产物。
