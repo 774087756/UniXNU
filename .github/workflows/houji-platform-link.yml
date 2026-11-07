@@ -1,0 +1,81 @@
+name: Houji research - platform link check
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  kernel:
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      JOBS: '3'
+      XNU_NATIVE_ARCH_TIMER: '1'
+      XNU_DT_PANIC_REGION: '1'
+      XNU_NATIVE_UFS_SM8350: '0'
+      XNU_ARMCPU: '1'
+      XNU_ARM_DT_PLATFORM: '1'
+      XNU_NATIVE_DWC3_CONSOLE: '0'
+      XNU_SOURCE_CORECRYPTO14: '0'
+      XNU_SOURCE_PTHREAD: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: none24smu/UniXNU
+          ref: 68c513467bb6c44106c053c410582c1d14f96dd7
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-logs
+          xcodebuild -version | tee ci-logs/toolchain.txt
+          sdk_version=$(xcrun --sdk iphoneos --show-sdk-version)
+          echo "iOS SDK: $sdk_version" | tee -a ci-logs/toolchain.txt
+          [[ "$sdk_version" == 26.* ]]
+          git rev-parse HEAD | tee ci-logs/source-commit.txt
+          brew install cmake ninja unifdef llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix unifdef)/bin" >> "$GITHUB_PATH"
+      - name: Fetch pinned platform sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule update --init drivers/ArmCpu drivers/ArmDTPlatform
+          test "$(git -C drivers/ArmCpu rev-parse HEAD)" = 1951cc8444b340d7d8879e9418220cf29eb711d7
+          test "$(git -C drivers/ArmDTPlatform rev-parse HEAD)" = 0d544705c2e89725caabc0542bb96bc8febd8c70
+          git submodule status drivers/ArmCpu drivers/ArmDTPlatform | tee ci-logs/platform-commits.txt
+      - name: Compile and link platform components
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build-xnu-12377.sh 2>&1 | tee ci-logs/kernel.log
+          kernel=build/xnu-12377.121.6/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf
+          test -s "$kernel"
+          file "$kernel" | tee ci-logs/kernel-type.txt
+          shasum -a 256 "$kernel" | tee ci-logs/kernel-sha256.txt
+          echo 'Generic ArmCpu and ArmDTPlatform link check only. No houji boot or hardware qualification.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Collect platform diagnostics
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p ci-logs/platform
+          for component in ArmCpu ArmDTPlatform; do
+            for name in compile.log compile-command.json; do
+              source="build/platform-12377/$component/$name"
+              if [ -f "$source" ]; then
+                cp "$source" "ci-logs/platform/$component-$name"
+              fi
+            done
+          done
+      - name: Retain diagnostic logs only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xnu-12377-platform-logs
+          path: ci-logs/
+          if-no-files-found: warn
+          retention-days: 7

@@ -1,0 +1,59 @@
+{
+  "status": "OFFLINE_CONTRACT_ONLY_NOT_BOOTABLE",
+  "fdt_sha256": "447f252737e719c110495b0b9100d2aac8783265a862f35dd6ae80f820f22ddd",
+  "properties_hex": {
+    "/arm-io:ranges": "00000000000000000000000000000000ffffffff00000000",
+    "/arm-io/intc:reg": "0000101700000000000001000000000000001817000000000000200000000000",
+    "/arm-io/intc:compatible": "61726d2c6769632d763300",
+    "/arm-io/intc:redistributor-stride": "0000040000000000",
+    "/psci:method": "736d6300"
+  },
+  "cpu_candidates": [
+    {
+      "source": "/cpus/cpu@0",
+      "affinity": "0x0",
+      "reg_le32": "00000000"
+    },
+    {
+      "source": "/cpus/cpu@100",
+      "affinity": "0x100",
+      "reg_le32": "00010000"
+    },
+    {
+      "source": "/cpus/cpu@200",
+      "affinity": "0x200",
+      "reg_le32": "00020000"
+    },
+    {
+      "source": "/cpus/cpu@300",
+      "affinity": "0x300",
+      "reg_le32": "00030000"
+    },
+    {
+      "source": "/cpus/cpu@400",
+      "affinity": "0x400",
+      "reg_le32": "00040000"
+    },
+    {
+      "source": "/cpus/cpu@500",
+      "affinity": "0x500",
+      "reg_le32": "00050000"
+    },
+    {
+      "source": "/cpus/cpu@600",
+      "affinity": "0x600",
+      "reg_le32": "00060000"
+    },
+    {
+      "source": "/cpus/cpu@700",
+      "affinity": "0x700",
+      "reg_le32": "00070000"
+    }
+  ],
+  "blockers": [
+    "Boot MPIDR and unique CPU state=running selection not verified; XNU AFF1/AFF0 lookup audited",
+    "Current UEFI memory ownership and contiguous allocation not verified",
+    "GOP, exception level and complete ADT requirements not verified"
+  ],
+  "smp_enabled": false
+}

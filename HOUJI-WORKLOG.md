@@ -1,0 +1,170 @@
+# 小米 14 / iOS 26 开发记录
+
+## 目标与边界
+
+直接研究 iOS 26 移植；已有 iOS 16 houji 实现作为硬件参考。
+设备为用户主力机，用户报告已备份、BL 解锁及 Root。
+当前仅源码与云端编译阶段；没有启动自定义镜像，没有刷写或修改手机分区。
+不记录手机序列号、账号凭据、固件内容或个人备份。
+
+## 固定输入
+
+| 仓库 | 提交 |
+| --- | --- |
+| lonzzi/UniXNU-houji | 99beb109d66d24d3a1780901cb8958ec3fb24b06 |
+| none24smu/UniXNU ios26 | 68c513467bb6c44106c053c410582c1d14f96dd7 |
+| none24smu/UniXNU-zeta | eb489285a1d9153872f00c93ebb519a269b249b5 |
+| Apple XNU baseline | ac9718fb1af618d5ce8678d0dc6e8a58f252216f / 12377.121.6 |
+
+## 2026-11-07（北京时间）
+
+- 用户 ADB 输出：houji / 23127PN0CC；Android 17，OS4.0.18.0.XNCCNXM；Linux 6.1.138；锁定状态 0；槽位 A；MemTotal 15524336 kB。
+- df 查询显示 482G、可用 308G，但挂载点为 /system/etc/hosts；绑定挂载关系未核实，不能据此规划分区。
+- houji 清单 2394 个文件哈希匹配；这不是编译或实机验证。
+- 用户完成 ios26 的 21 个子模块下载，以及参考设备仓库下载。
+- 用户仓库 https://github.com/774087756/UniXNU 已有 ios26 分支。
+- GitHub 连接可读取，写入工作流返回 403；后续由用户网页提交工作流。
+- CI https://github.com/774087756/UniXNU/actions/runs/42381789615 ：测试对象编译成功，但实际 Xcode 16.4 / SDK 18.5，原检查缺少版本门控，不能算 iOS 26 工具链通过。
+- CI https://github.com/774087756/UniXNU/actions/runs/42382200810 ：Xcode 26.6 / iOS SDK 26.5 / ARM64，版本门控和测试对象编译成功。
+- 新增 houji-kernel-baseline.yml：固定框架提交，使用上游 XNU 12377 构建脚本；禁用 SM8350 UFS、设备 CPU/platform/USB 及用户空间提供者，先验证基础编译。开启通用架构定时器与 DT panic 选项不等于 houji 硬件适配完成。
+- 工作流仅上传日志，不上传 KDK、SDK、IPSW、系统卷或内核二进制。脚本仍需下载依赖与按上游 SHA256 校验的 KDK 头文件输入。
+- 此阶段主要框架/XNU 输入固定；构建脚本的部分辅助源码仍使用上游 tag，Homebrew 版本未完全锁定。不得宣称字节级可重复构建。
+
+## 未完成 / 下一步
+
+### 首轮内核 CI（2026-11-07 22:46 北京时间检查）
+
+- 运行：https://github.com/774087756/UniXNU/actions/runs/42382941118
+- Job：128434219070。
+- checkout、Python 设置、Verify toolchain 均成功；Compile baseline only 正在运行。
+- 完整 job 日志下载返回 BlobNotFound（404），当前未取得编译日志；这不是内核编译失败的证据。
+- 编译是否通过、内核是否成功链接及产物哈希均待任务结束确认。未进行手机操作。
+
+1. 首轮基础内核编译成功；下一轮接入平台组件并验证链接，不直接进入实机启动。
+2. 成功后建立独立 houji 设备配置，移植平台匹配、内存交接、GIC/定时器和日志通道。
+3. 核实本机固件/设备树、恢复路径和实际存储挂载；实机测试前单独检查写盘行为。
+4. CPU 多核、UFS、用户空间、显示触控、GPU 分阶段验证。
+
+## 更新规则
+
+### 首轮内核 CI 最终结果（2026-11-07）
+
+- Run 42382941118 / Job 128434219070 最终 success；完整日志已读取。
+- 22:53:00 北京时间执行 LD，22:53:09 报告 built kernel；文件类型为 Mach-O 64-bit executable arm64。
+- 未剥离 noctf 内核大小：22399464 字节。
+- SHA256：327dc745abeec0823a885042de84504b7dd3ccf8374d2878871612866e7d85b9。
+- 诊断日志 artifact：13578951540；ZIP SHA256 d86da83a87596f36239928e0437350da5981634e4f4d9188d903ff0fc34df31a。
+- 日志有编译/链接警告，未阻止本次构建；未宣称无警告。
+- 本轮按工作流仅保留日志，内核二进制没有作为 artifact 上传，不应要求用户下载日志后刷写。
+- 结论仅为 XNU 12377 基础内核编译链接成功。ArmCpu、ArmDTPlatform、UFS、USB console 等仍关闭，无 houji 实机验证。
+
+每轮记录输入提交、变更、运行链接、实际结果和未解决项。
+编译成功不等于实机启动；内核启动不等于 iOS 桌面；桌面不等于可日常使用。
+
+## 2026-11-08：平台组件链接验证准备
+
+- 新增 `.github/workflows/houji-platform-link.yml`，保留已成功的基础工作流不变。
+- 启用 XNU_ARMCPU=1、XNU_ARM_DT_PLATFORM=1；架构定时器保持开启。未启用 UFS、USB console、crypto/pthread 提供者。
+- 只下载 ArmCpu 与 ArmDTPlatform 子模块，并在 CI 中核对精确提交。
+- 检查上游 build-platform-12377.py：使用该轮 XNU 编译记录构建组件；ArmCpu 应用两项上游补丁；验证 ARM64 Mach-O 对象和 iOS 26 deployment 后创建归档，由内核脚本重新链接。
+- 此轮仍为通用平台编译链接验证，未添加 houji 设备树、内存布局或实机启动配置。不能将成功结果描述为小米 14 驱动已适配。
+- 收集每个组件 compile.log 和 compile-command.json，保留最终内核哈希与完整构建日志；不上传内核二进制。
+- 本地四个 shell 块通过 bash -n。当前 Python 缺少 PyYAML，未执行 YAML 解析器检查；macOS 编译须由 CI 验证。
+- 状态：本地文件已准备，尚未上传或触发本轮 CI。GitHub 写入权限此前返回 403，由用户网页提交后运行。
+
+### 平台组件 CI 已启动（2026-11-08 11:55 北京时间检查）
+
+- 用户提交运行链接：https://github.com/774087756/UniXNU/actions/runs/42444612478。
+- Job 128620809691 状态 in_progress，conclusion 为空；接口没有返回步骤列表。
+- 完整日志下载仍返回 BlobNotFound（404）。尚不能确认组件编译、最终链接或产物哈希；这不是构建失败结论。
+- 等待任务结束后读取日志并更新最终结果。无手机操作。
+
+### 平台组件 CI 最终结果（2026-11-08）
+
+- Run 42444612478 / Job 128620809691 最终 success。步骤摘要部分字段仍显示旧状态，以完整日志中的组件验证及最终链接为依据。
+- ArmCpu、ArmDTPlatform 启用；完整日志显示最终内核链接完成，12:02:02 北京时间报告 built kernel。
+- 输出 Mach-O 64-bit executable arm64；未剥离 noctf 内核 22447288 字节。
+- 内核 SHA256：3c6b4bbac97361d37006801ce4a2cc14dc8a171366dca6390052621326b13cb5。
+- 日志 artifact 13603476006，共 10 个文件；ZIP SHA256 2564d661815a1a75f0720324bc5f4d5784e4d306e23fd762023736d8f52b2030。
+- 通用平台组件编译链接验证通过；仍有构建警告。没有 houji 实机启动证据。
+- 下一步从通用编译转入 houji 引导/设备树/内存布局接口核对，准备设备专用最小配置。不能直接刷本轮内核，且本轮未上传内核二进制。
+
+## 2026-11-08：计划书与 P1 首轮审计
+
+- 新增 HOUJI-PROJECT-PLAN.md，列出 P0-P6、交付/验收、主力机边界、分工和记录规则。
+- 已核查具体接口差异：旧 SweetPlatformExpert.cpp 的 processTopLevel 绕开原 NVRAM 发布路径；新 ArmDTPlatform.cpp 要求 /chosen 中有效 nvram-bank-size 与 nvram-proxy-data，并需要 options/cpus/arm-io/defaults。旧 ADT 不能未经校验直接复用。
+- 新 ArmCpu.cpp 读取 /arm-io/intc 的 reg/compatible/redistributor-stride，以及 /arm-io ranges；PSCI method 来自 /psci，不默认选择 smc/hvc。旧平台代码排除名为 gic 的子节点，尚需检查实际 ADT 生成器以确定节点转换，不能仅靠命名推断地址。
+- houji MemoryMapLib.c 标注源于一次捕获的 xbl_config，SHA256 为 1fd55850171f68f8658c2342820b76ee60d28733dfcc93ad365dd43e660f490d；包含硬编码保留区，尚未与用户本机固件匹配。不因设备同为 houji 就视为已验证。
+- 下一步继续定位 ADT 生成入口与 DarwinBoot 补丁，形成参数来源表，再列出必要的本机只读采集项。未修改启动地址、未生成实机候选。
+
+### P1 启动接口审计进展
+
+- 新增 HOUJI-BOOT-AUDIT.md：记录 NVRAM、GIC、CPU/PSCI、内存、显示及生成器来源。
+- 修正前述推断：旧 SweetPlatformExpert 绕开 NVRAM 发布路径，并不意味着旧 ADT 没有 NVRAM。archive/scripts/make-houji-adt.py 明确生成 8 KiB CHRP proxy；仍须验证新内核兼容性。
+- 已找到旧生成器；其位于 archive、依赖外部固定 reference，未当作当前有效构建入口执行。
+- 明确阻塞：旧 gic 节点与新 intc 契约不同；历史 0x40000 stride、帧缓冲地址和 xbl 内存图尚未对本机核实。
+- 下一步只读检查本机原始 FDT 的可访问性，随后设计字节不损坏的本地采集；不刷写、不重启、不改权限。
+
+### 本机 FDT 采集准备
+
+- 用户输出确认 ro.soc.model=SM8650、ro.boot.hardware=qcom；bootloader 属性为空，不据此推断版本。
+- /sys/firmware/fdt 普通 shell 权限不足；展开设备树目录可列出 cpus/memory/reserved-memory/soc 等。
+- xbl_config_a 指向 /dev/block/sdb2，xbl_config_b 指向 /dev/block/sdc2；仅路径存在，不代表内容已读取或匹配。
+- 新增 scripts/collect-houji-fdt.py：只允许一个已授权 houji，以 adb exec-out + su cat 读取 FDT，在电脑私有目录保存原始字节，不写手机、不读 xbl 分区。
+- 主机验证：合法头部通过；文本错误、截断和错误 magic 均拒绝。尚未实际采集；头部校验不等于完整 FDT 语义验证。
+
+### FDT collection retry: remote command quoting
+- User reported FDT magic validation failure; no DTB was saved.
+- Corrected remote shell quoting: adb must preserve the complete cat command as the argument to su -c. This is a suspected cause, pending device verification.
+- Added bounded text/hex diagnostics and a clean failure message. Binary device tree contents are not printed.
+- CLI help check passed. No phone writes or reboot performed; real-device retry remains pending.
+
+### FDT collection blocked: su unavailable to ADB shell
+- Retry returned 46 bytes of text: /system/bin/sh: su: inaccessible or not found.
+- FDT was not read and no DTB was saved. Current evidence establishes only that su is unavailable/inaccessible in this shell; it does not establish that the phone is unrooted.
+- Next: user checks root manager status and read-only shell PATH/command lookup. No partition or root configuration changes performed.
+
+### Root availability check
+- User reports uid=2000(shell), SELinux context u:r:shell:s0; command -v su returned no path.
+- /system/bin/su, /system/xbin/su, /sbin/su, /debug_ramdisk/su all returned No such file or directory.
+- Root access from ADB remains unavailable. This does not distinguish inactive root from manager-specific restrictions. Awaiting root manager name and current status before proposing any configuration change.
+- Raw FDT collection remains blocked; no phone writes performed.
+
+### ADB root access verified
+- User ran adb shell su -c id and received uid=0(root), gid=0(root), context=u:r:ksu:s0.
+- KernelSU root execution is now verified for ADB shell. Live FDT collection can be retried using the existing read-only collector.
+- FDT acquisition and hardware analysis remain pending; no boot/flash operations performed.
+
+### Live FDT acquired and inspected offline
+- Verified local 961025-byte FDT SHA256 447f252737e719c110495b0b9100d2aac8783265a862f35dd6ae80f820f22ddd against user output.
+- Added scripts/inspect-houji-fdt.py; traversed 5064 nodes. Selected results in HOUJI-LIVE-FDT-AUDIT.md.
+- Confirmed PSCI smc, GICD 0x17100000, GICR 0x17180000, stride 0x40000, eight CPU nodes. CPU reg is big-endian 64-bit; ArmCpu reads first 32 bits, so raw copying is invalid.
+- Memory has 16 tuples; reserved-memory has 58 children. Splash reservation matches historical address but framebuffer geometry remains unverified.
+- No phone commands, flashing or MMIO accesses performed during offline analysis. Next: UEFI memory map comparison and ADT encoding validation.
+
+### Offline UEFI memory comparison and ADT contract
+- Added audit-houji-memory.py and generated HOUJI-MEMORY-COMPARISON.md from 41 literal UEFI descriptors, 41 nonzero fixed FDT reservations, and 15 nodes lacking reg; two zero-sized demura entries excluded.
+- Identified XBL_Ramdump/qlink naming-address mismatch and ramoops overlap with FD_Reserved/UEFI_FD. These require lifecycle/current firmware verification, not automatic relocation.
+- Added HOUJI-ADT-CONTRACT.md with explicit little-endian widths, GIC values and unresolved CPU ID semantics. High RAM coverage alone is not allocation approval.
+- Passed interval boundary checks and GIC encoding/range checks. No bootable configuration produced; no phone operations performed.
+
+### CPU affinity and DarwinBoot handoff audit
+- Confirmed ArmCpu reg carries physical affinity through ml_get_cpu_number, info.phys_id and PSCI CPU_ON; do not replace with sequential logical indices.
+- Added prepare-houji-adt-contract.py and HOUJI-ADT-CANDIDATE.json, explicitly nonbootable. Real FDT conversion/round-trip checks and malformed input rejection passed.
+- Added HOUJI-DARWINBOOT-HANDOFF.md: EL1, GOP prerequisite, actual contiguous UEFI allocation, 256 MiB default, 256 MiB-8 GiB explicit parser range, and ExitBootServices failure boundary.
+- Corrected earlier generic assumption: current Boot implementation does not visibly patch ADT dram-base/size; BootArgs are populated from allocation. Exact XNU topology and ADT consumers remain to verify.
+- No phone writes, boots or driver changes performed.
+
+### 2026-11-08 progress and pinned XNU topology audit
+- P0 toolchain/kernel/platform compile milestones complete; P1 offline board adaptation ongoing. No bootable image or on-device XNU boot established.
+- Read Apple machine_routines.c at pinned ac9718fb1af618d5ce8678d0dc6e8a58f252216f via GitHub; checked local topology-related patch scope.
+- Confirmed mandatory CPU state, running boot CPU selection, sequential accepted logical IDs, AFF1/AFF0 physical lookup, and one-cluster/eight-CPU patch limits. Linux cpu-map cannot be copied as a direct cpus child.
+- Added HOUJI-XNU-TOPOLOGY-AUDIT.md and refreshed nonbootable candidate blockers. Real-FDT generator rerun passed.
+- Previous handoff document's missing-source statement describes the earlier stage; pinned CPU source is now reviewed. Actual boot MPIDR, full ADT/CHRP requirements and UEFI memory ownership remain unverified.
+
+### CHRP fixture validation
+- Read pinned Apple IONVRAM.cpp and IONVRAMCHRPHandler.cpp; confirmed bank length and Adler requirements, generation offset 20, 16-byte CHRP blocks.
+- Added check-houji-chrp.py and HOUJI-NVRAM-AUDIT.md. Historical 8192-byte fixture passed model checks; four corruption/bounds cases rejected.
+- No Apple handler execution claimed. Full getNVRAMProperties/unserialize/publication chain and complete ADT validation remain pending.
+- Read pinned pe_init.c and arm_vm_init.c; no dram-base/dram-size strings there. This is only scoped negative evidence, not proof those properties are unused globally.
+- No phone operation or bootable artifact generated.
